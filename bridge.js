@@ -1,11 +1,6 @@
 // ============================================
 // PONTE WhatsApp (Z-API) + Agente de IA (Gemini)
 // ============================================
-// Instale as dependências:
-//   npm init -y
-//   npm install express axios dotenv
-// ============================================
-
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
@@ -40,11 +35,12 @@ async function gerarResposta(mensagemDoCliente, historico) {
     parts: [{ text: systemPrompt + '\n\n' + mensagemDoCliente }]
   });
 
-  const resposta = await axios.post(
-    AI_URL + '?key=' + API_KEY,
-    { contents },
-    { headers: { 'Content-Type': 'application/json' } }
-  );
+  const url = AI_URL + '?key=' + API_KEY;
+  console.log('Chamando Gemini em:', url);
+
+  const resposta = await axios.post(url, { contents }, {
+    headers: { 'Content-Type': 'application/json' }
+  });
 
   // Extrai o texto da resposta do Gemini
   return resposta.data.candidates[0].content.parts[0].text;
@@ -53,6 +49,7 @@ async function gerarResposta(mensagemDoCliente, historico) {
 // ---------- FUNÇÃO: enviar resposta pelo WhatsApp ----------
 async function enviarWhatsApp(numero, texto) {
   const url = `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`;
+  console.log('Enviando resposta para Z-API em:', url);
   await axios.post(url, {
     phone: numero,
     message: texto
@@ -75,6 +72,8 @@ app.post('/webhook', async (req, res) => {
     // Limpa o número: "5511999999999@c.us" → "5511999999999"
     numero = numero.replace('@c.us', '').replace('@s.whatsapp.net', '');
 
+    console.log('Mensagem recebida de', numero, ':', texto);
+
     // Ignora mensagens vazias, de status ou enviadas por mim
     if (!texto || !numero || msg.fromMe) return res.sendStatus(200);
 
@@ -89,7 +88,11 @@ app.post('/webhook', async (req, res) => {
 
     res.sendStatus(200);
   } catch (erro) {
+    // LOG DETALHADO — mostra qual URL falhou e por quê
     console.error('Erro no webhook:', erro.message);
+    console.error('URL que falhou:', erro.config?.url);
+    console.error('Status:', erro.response?.status);
+    console.error('Detalhe:', JSON.stringify(erro.response?.data));
     res.sendStatus(200);
   }
 });

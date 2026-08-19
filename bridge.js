@@ -42,7 +42,6 @@ async function gerarResposta(mensagemDoCliente, historico) {
     headers: { 'Content-Type': 'application/json' }
   });
 
-  // Extrai o texto da resposta do Gemini
   return resposta.data.candidates[0].content.parts[0].text;
 }
 
@@ -64,12 +63,13 @@ app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
 
-    // Formato da Z-API: a mensagem está em body.data.message
-    const msg = body.data?.message || body.message || {};
-    const texto = msg.text?.message || msg.text || '';
-    let numero = msg.from || msg.phone || '';
+    // Formato REAL da Z-API: payload plano (phone + text.message)
+    // Fallback para o formato de teste (body.data.message)
+    const msg = body.data?.message || body;
+    const texto = msg.text?.message || msg.text || body.text?.message || '';
+    let numero = msg.phone || msg.from || body.phone || '';
 
-    // Limpa o número: "5511999999999@c.us" → "5511999999999"
+    // Limpa sufixos caso venham (ex: "5511999999999@c.us")
     numero = numero.replace('@c.us', '').replace('@s.whatsapp.net', '');
 
     console.log('Mensagem recebida de', numero, ':', texto);
@@ -88,7 +88,6 @@ app.post('/webhook', async (req, res) => {
 
     res.sendStatus(200);
   } catch (erro) {
-    // LOG DETALHADO — mostra qual URL falhou e por quê
     console.error('Erro no webhook:', erro.message);
     console.error('URL que falhou:', erro.config?.url);
     console.error('Status:', erro.response?.status);

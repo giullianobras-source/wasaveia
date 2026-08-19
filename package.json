@@ -1,0 +1,14 @@
+{
+  "name": "wasaveia",
+  "version": "1.0.0",
+  "description": "Ponte WhatsApp (Z-API) + Agente de IA",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.19.0"
+  }
+}

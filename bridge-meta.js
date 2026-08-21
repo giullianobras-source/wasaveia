@@ -10,7 +10,7 @@ app.use(express.json());
 
 // ---------- CONFIGURAÇÃO (do .env) ----------
 const PORT = process.env.PORT || 3000;
-const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'wasaveia_token_2026';
+const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'Ba96350836??wasaveia_token_2026';
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;   // token EAA...
 const PHONE_NUMBER_ID   = process.env.PHONE_NUMBER_ID;     // 1197397706799276
 const GRAPH_VERSION     = 'v21.0';

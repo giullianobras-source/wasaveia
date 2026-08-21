@@ -45,6 +45,22 @@ async function gerarResposta(mensagemDoCliente, historico) {
   return resposta.data.candidates[0].content.parts[0].text;
 }
 
+// ---------- VERIFICAÇÃO DO WEBHOOK (Meta) ----------
+const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'wasaveia_token_2026';
+
+app.get('/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === META_VERIFY_TOKEN) {
+    console.log('Webhook verificado pela Meta!');
+    res.status(200).send(challenge);
+  } else {
+    res.sendStatus(403);
+  }
+});
+
 // ---------- FUNÇÃO: enviar resposta pelo WhatsApp ----------
 async function enviarWhatsApp(numero, texto) {
   const url = `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`;

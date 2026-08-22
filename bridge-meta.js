@@ -1,4 +1,4 @@
-// bridge-meta.js - Versão com memória por cliente, saudação e integração WooCommerce (busca por e-mail)
+// bridge-meta.js - Versão com memória, saudação e integração WooCommerce via endpoint próprio (Opção B)
 const express = require('express');
 const axios = require('axios');
 const { Redis } = require('@upstash/redis'); // Upstash Redis via REST/HTTPS
@@ -8,16 +8,15 @@ app.use(express.json());
 
 // ===== CONFIGURAÇÃO =====
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'Ba96350836??wasaveia_token_2026';
+const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'wasaveia_token_2026';
 const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN; // Token permanente
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || '1197397706799276';
 const AI_URL = process.env.AI_URL; // URL do Gemini
 const AI_API_KEY = process.env.AI_API_KEY;
 
-// WooCommerce
-const WOO_URL = process.env.WOO_URL;                 // https://seusite.com (sem barra no final)
-const WOO_CONSUMER_KEY = process.env.WOO_CONSUMER_KEY;
-const WOO_CONSUMER_SECRET = process.env.WOO_CONSUMER_SECRET;
+// WooCommerce (Opção B - endpoint próprio no WordPress)
+const WOO_URL = process.env.WOO_URL;                 // https://savemax.com.br (sem barra no final)
+const WOO_CONSUMER_KEY = process.env.WOO_CONSUMER_KEY; // AGORA guarda o token do endpoint (X-Save-Token)
 
 // Saudação fixa para primeiro contato
 const WELCOME_MESSAGE = 'Olá! Sou o Save, como posso ajudar?';
@@ -85,42 +84,31 @@ async function callGemini(history) {
   return res.data.candidates[0].content.parts[0].text;
 }
 
-// ===== WOOCOMMERCE (busca por E-MAIL) =====
+// ===== WOOCOMMERCE (Opção B - endpoint próprio, compatível com HPOS) =====
 
-// Busca os pedidos do cliente pelo e-mail
+// Busca os pedidos do cliente pelo e-mail no endpoint próprio do WordPress
 async function getWooOrdersByEmail(email) {
   try {
-    if (!WOO_URL || !WOO_CONSUMER_KEY || !WOO_CONSUMER_SECRET) {
+    if (!WOO_URL || !WOO_CONSUMER_KEY) {
       console.error('WooCommerce não configurado (faltam variáveis WOO_*)');
       return null;
     }
 
-    // Busca pedidos filtrando por e-mail de cobrança (billing)
-    const url = `${WOO_URL}/wp-json/wc/v3/orders?search=${encodeURIComponent(email)}&per_page=5&status=any`;
+    const url = `${WOO_URL}/wp-json/save/v1/orders?email=${encodeURIComponent(email)}`;
     const res = await axios.get(url, {
-      auth: {
-        username: WOO_CONSUMER_KEY,
-        password: WOO_CONSUMER_SECRET
+      headers: {
+        'X-Save-Token': WOO_CONSUMER_KEY // token de proteção do endpoint
       }
     });
 
-    const orders = res.data.filter(o =>
-      (o.billing?.email || '').toLowerCase() === email.toLowerCase()
-    );
+    const orders = res.data;
+    if (!orders || orders.length === 0) return null;
 
-    if (orders.length === 0) return null;
-
-    // Resume os pedidos de forma legível para o Gemini
-    return orders.map(o => ({
-      numero: o.number,
-      status: o.status,
-      total: o.total,
-      data: o.date_created,
-      itens: o.line_items.map(i => `${i.name} (x${i.quantity})`),
-      endereco: o.shipping?.address_1 ? `${o.shipping.address_1}, ${o.shipping.city} - ${o.shipping.state}` : 'não informado'
-    }));
+    return orders;
   } catch (e) {
     console.error('Erro ao buscar WooCommerce:', e.message);
+    console.error('Status:', e.response?.status);
+    console.error('Detalhe:', e.response?.data);
     return null;
   }
 }

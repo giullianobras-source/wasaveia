@@ -1,26 +1,92 @@
-// ============================================
-// PONTE WhatsApp Cloud API (Meta) + Agente (Gemini)
-// ============================================
-require('dotenv').config();
+// bridge-meta.js - Versão melhorada com memória por cliente, saudação e persistência
 const express = require('express');
 const axios = require('axios');
+const { createClient } = require('redis'); // Redis/Upstash para persistência
 
 const app = express();
 app.use(express.json());
 
-// ---------- CONFIGURAÇÃO (do .env) ----------
+// ===== CONFIGURAÇÃO =====
 const PORT = process.env.PORT || 3000;
-const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'Ba96350836??wasaveia_token_2026';
-const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;   // token EAA...
-const PHONE_NUMBER_ID   = process.env.PHONE_NUMBER_ID;     // 1197397706799276
-const GRAPH_VERSION     = 'v21.0';
+const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'wasaveia_token_2026';
+const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN; // Token permanente
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || '1197397706799276';
+const AI_URL = process.env.AI_URL; // URL do Gemini
+const AI_API_KEY = process.env.AI_API_KEY;
 
-// ---------- VERIFICAÇÃO DO WEBHOOK (handshake da Meta) ----------
+// Saudação fixa para primeiro contato
+const WELCOME_MESSAGE = 'Olá! Sou o Save, como posso ajudar?';
+
+// TTL do histórico: 24h (um dia de conversa por cliente)
+const SESSION_TTL_SECONDS = 24 * 60 * 60;
+
+// ===== CLIENTE REDIS (Upstash) =====
+// Crie um banco Redis grátis em https://upstash.com e cole a URL na variável REDIS_URL
+const redis = createClient({ url: process.env.REDIS_URL });
+redis.on('error', (err) => console.error('Redis error:', err.message));
+redis.connect().then(() => console.log('Redis conectado ✅')).catch((e) => console.error('Falha ao conectar Redis:', e.message));
+
+// ===== HELPERS =====
+
+// Busca o histórico do dia de um cliente
+async function getHistory(phone) {
+  try {
+    const data = await redis.get(`hist:${phone}`);
+    return data ? JSON.parse(data) : [];
+  } catch (e) {
+    console.error('Erro ao ler histórico:', e.message);
+    return [];
+  }
+}
+
+// Salva o histórico do dia de um cliente (com TTL de 24h)
+async function saveHistory(phone, history) {
+  try {
+    await redis.set(`hist:${phone}`, JSON.stringify(history), { EX: SESSION_TTL_SECONDS });
+  } catch (e) {
+    console.error('Erro ao salvar histórico:', e.message);
+  }
+}
+
+// Verifica se é o primeiro contato do dia
+async function isFirstContact(phone) {
+  const exists = await redis.exists(`hist:${phone}`);
+  return exists === 0;
+}
+
+// Envia mensagem via Graph API da Meta
+async function sendWhatsApp(to, text) {
+  const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
+  const payload = {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'text',
+    text: { body: text }
+  };
+  const res = await axios.post(url, payload, {
+    headers: {
+      'Authorization': `Bearer ${ACCESS_TOKEN}`,
+      'Content-Type': 'application/json'
+    }
+  });
+  return res.data;
+}
+
+// Chama o Gemini (o "Save")
+async function callGemini(history) {
+  const res = await axios.post(`${AI_URL}?key=${AI_API_KEY}`, {
+    contents: history
+  });
+  return res.data.candidates[0].content.parts[0].text;
+}
+
+// ===== WEBHOOK - Verificação (GET) =====
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-  if (mode === 'subscribe' && token === META_VERIFY_TOKEN) {
+
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
     console.log('Webhook verificado pela Meta!');
     res.status(200).send(challenge);
   } else {
@@ -28,94 +94,54 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// ---------- FUNÇÃO: chamar o Gemini (o "Save") ----------
-async function gerarResposta(mensagemDoCliente, historico) {
-  const API_KEY = process.env.AI_API_KEY;
-  const AI_URL  = process.env.AI_URL;
-
-  const systemPrompt = `
-    Você é o "Save", assistente de IA de atendimento ao cliente.
-    Seja educado, objetivo e prestativo. Responda em português.
-    Regras: [EDITE AQUI as regras do seu negócio]
-  `;
-
-  const contents = historico.map(m => ({
-    role: m.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: m.content }]
-  }));
-  contents.unshift({ role: 'user', parts: [{ text: systemPrompt + '\n\n' + mensagemDoCliente }] });
-
-  const url = AI_URL + '?key=' + API_KEY;
-  console.log('Chamando Gemini em:', url);
-
-  const resposta = await axios.post(url, { contents }, {
-    headers: { 'Content-Type': 'application/json' }
-  });
-  return resposta.data.candidates[0].content.parts[0].text;
-}
-
-// ---------- FUNÇÃO: enviar resposta via Graph API (Meta) ----------
-async function enviarWhatsApp(numero, texto) {
-  const url = `https://graph.facebook.com/${GRAPH_VERSION}/${PHONE_NUMBER_ID}/messages`;
-  console.log('Enviando resposta via Meta para', numero);
-  await axios.post(url, {
-    messaging_product: 'whatsapp',
-    to: numero,
-    type: 'text',
-    text: { body: texto }
-  }, {
-    headers: {
-      'Authorization': `Bearer ${META_ACCESS_TOKEN}`,
-      'Content-Type': 'application/json'
-    }
-  });
-}
-
-// ---------- MEMÓRIA simples por cliente ----------
-const conversas = {};
-
-// ---------- WEBHOOK: recebe mensagens da Meta ----------
+// ===== WEBHOOK - Recebimento de mensagens (POST) =====
 app.post('/webhook', async (req, res) => {
+  // Responde 200 imediatamente para a Meta não reenviar
+  res.sendStatus(200);
+
   try {
     const body = req.body;
+    if (body.object !== 'whatsapp_business_account') return;
 
-    // Formato da Meta: entry[0].changes[0].value.messages[0]
     const entry = body.entry?.[0];
-    const value = entry?.changes?.[0]?.value;
-    const msg = value?.messages?.[0];
+    const changes = entry?.changes?.[0];
+    const value = changes?.value;
+    const message = value?.messages?.[0];
 
-    // Se não for mensagem (status, entrega etc.), confirma e ignora
-    if (!msg) return res.sendStatus(200);
+    if (!message || message.type !== 'text') return;
 
-    const texto = msg.text?.body || '';
-    let numero = msg.from || '';
+    const phone = message.from; // número do cliente
+    const text = message.text.body;
+    console.log(`Mensagem recebida de ${phone}: ${text}`);
 
-    console.log('Mensagem recebida de', numero, ':', texto);
+    // --- 1. Primeiro contato do dia: envia saudação fixa ---
+    const firstContact = await isFirstContact(phone);
+    if (firstContact) {
+      await sendWhatsApp(phone, WELCOME_MESSAGE);
+      console.log(`Saudação enviada para ${phone}`);
+    }
 
-    if (!texto || !numero) return res.sendStatus(200);
+    // --- 2. Monta o histórico do dia (com a nova mensagem) ---
+    const history = await getHistory(phone);
+    history.push({ role: 'user', parts: [{ text }] });
 
-    if (!conversas[numero]) conversas[numero] = [];
-    conversas[numero].push({ role: 'user', content: texto });
+    // --- 3. Chama o Gemini com TODO o histórico do dia ---
+    const reply = await callGemini(history);
+    console.log(`Resposta do Gemini para ${phone}: ${reply}`);
 
-    const resposta = await gerarResposta(texto, conversas[numero]);
+    // --- 4. Envia a resposta e salva no histórico ---
+    await sendWhatsApp(phone, reply);
+    history.push({ role: 'model', parts: [{ text: reply }] });
+    await saveHistory(phone, history);
 
-    conversas[numero].push({ role: 'assistant', content: resposta });
-
-    await enviarWhatsApp(numero, resposta);
-
-    res.sendStatus(200);
-  } catch (erro) {
-    console.error('Erro no webhook:', erro.message);
-    console.error('URL que falhou:', erro.config?.url);
-    console.error('Status:', erro.response?.status);
-    console.error('Detalhe:', JSON.stringify(erro.response?.data));
-    res.sendStatus(200);
+  } catch (err) {
+    console.error('Erro no webhook:', err.message);
+    console.error('Status:', err.response?.status);
+    console.error('Detalhe:', err.response?.data?.error?.message);
   }
 });
 
-// ---------- Health check ----------
-app.get('/', (req, res) => res.send('Ponte Meta rodando!'));
-
+// ===== INICIALIZAÇÃO =====
 app.listen(PORT, () => {
   console.log(`Ponte Meta ativa na porta ${PORT}`);
 });

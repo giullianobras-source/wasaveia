@@ -1,6 +1,5 @@
-
 {
-  "name": "wasaveia-1",
+  "name": "wasaveia-bridge",
   "version": "1.0.0",
   "description": "Ponte WhatsApp Cloud API Meta + Gemini (Save)",
   "main": "bridge-meta.js",
@@ -13,6 +12,6 @@
   "dependencies": {
     "express": "^4.19.2",
     "axios": "^1.7.2",
-    "redis": "^4.6.13"
+    "@upstash/redis": "^1.34.3"
   }
 }

@@ -1,4 +1,4 @@
-// bridge-meta.js - Versão com memória, saudação e integração WooCommerce (e-mail, telefone ou CNPJ)
+// bridge-meta.js - Versão com memória, saudação, integração WooCommerce (e-mail, telefone ou CNPJ) e tratamento de erro de cota
 const express = require('express');
 const axios = require('axios');
 const { Redis } = require('@upstash/redis'); // Upstash Redis via REST/HTTPS
@@ -8,7 +8,7 @@ app.use(express.json());
 
 // ===== CONFIGURAÇÃO =====
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'Ba96350836??wasaveia_token_2026';
+const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'wasaveia_token_2026';
 const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN; // Token permanente
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || '1197397706799276';
 const AI_URL = process.env.AI_URL; // URL do Gemini
@@ -76,12 +76,37 @@ async function sendWhatsApp(to, text) {
   return res.data;
 }
 
-// Chama o Gemini (o "Save")
+// Chama o Gemini (o "Save") com tratamento de erro de cota (429) e retry
 async function callGemini(history) {
-  const res = await axios.post(`${AI_URL}?key=${AI_API_KEY}`, {
-    contents: history
-  });
-  return res.data.candidates[0].content.parts[0].text;
+  const MAX_TRIES = 3;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+    try {
+      const res = await axios.post(`${AI_URL}?key=${AI_API_KEY}`, {
+        contents: history
+      });
+      return res.data.candidates[0].content.parts[0].text;
+    } catch (e) {
+      lastError = e;
+      const status = e.response?.status;
+
+      // Erro de cota (429) ou falha do servidor (500) → tenta de novo
+      if (status === 429 || status === 500 || status === 503) {
+        console.error(`Gemini erro ${status} (tentativa ${attempt}/${MAX_TRIES}): ${e.message}`);
+        if (attempt < MAX_TRIES) {
+          // Espera 2s entre tentativas (respeita o tempo sugerido pelo 429)
+          await new Promise(res => setTimeout(res, 2000));
+          continue;
+        }
+      }
+
+      // Outros erros (4xx, etc.) → não adianta tentar de novo
+      throw e;
+    }
+  }
+
+  throw lastError;
 }
 
 // ===== WOOCOMMERCE (busca por e-mail, telefone ou CNPJ) =====
@@ -191,9 +216,18 @@ app.post('/webhook', async (req, res) => {
       geminiHistory.push({ role: 'user', parts: [{ text: `[Contexto do sistema]${wooContext}` }] });
     }
 
-    // --- 5. Chama o Gemini com TODO o histórico do dia ---
-    const reply = await callGemini(geminiHistory);
-    console.log(`Resposta do Gemini para ${phone}: ${reply}`);
+    // --- 5. Chama o Gemini com TODO o histórico do dia (com tratamento de erro) ---
+    let reply;
+    try {
+      reply = await callGemini(geminiHistory);
+      console.log(`Resposta do Gemini para ${phone}: ${reply}`);
+    } catch (e) {
+      const status = e.response?.status;
+      console.error(`Falha ao chamar Gemini (${status}):`, e.message);
+
+      // Mensagem amigável quando a IA não consegue responder (cota/falha)
+      reply = '😅 Estou com um pico de atendimento agora e não consegui processar sua mensagem. Por favor, tente novamente em instantes. Se preferir, me mande o e-mail, telefone ou CNPJ da compra que eu verifico seu pedido assim que voltar.';
+    }
 
     // --- 6. Envia a resposta e salva no histórico ---
     await sendWhatsApp(phone, reply);

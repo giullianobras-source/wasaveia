@@ -1,4 +1,4 @@
-// bridge-meta.js - Versão com memória, saudação e integração WooCommerce via endpoint próprio (Opção B)
+// bridge-meta.js - Versão com memória, saudação e integração WooCommerce (e-mail, telefone ou CNPJ)
 const express = require('express');
 const axios = require('axios');
 const { Redis } = require('@upstash/redis'); // Upstash Redis via REST/HTTPS
@@ -14,12 +14,12 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || '1197397706799276';
 const AI_URL = process.env.AI_URL; // URL do Gemini
 const AI_API_KEY = process.env.AI_API_KEY;
 
-// WooCommerce (Opção B - endpoint próprio no WordPress)
+// WooCommerce (endpoint próprio no WordPress)
 const WOO_URL = process.env.WOO_URL;                 // https://savemax.com.br (sem barra no final)
-const WOO_CONSUMER_KEY = process.env.WOO_CONSUMER_KEY; // AGORA guarda o token do endpoint (X-Save-Token)
+const WOO_CONSUMER_KEY = process.env.WOO_CONSUMER_KEY; // Token do endpoint (X-Save-Token)
 
-// Saudação fixa para primeiro contato
-const WELCOME_MESSAGE = 'Olá! Sou o Save, como posso ajudar?';
+// Saudação para primeiro contato
+const WELCOME_MESSAGE = 'Olá! Sou o Save, assistente da Moobbile. 👋\n\nPosso te ajudar com:\n• Status do seu pedido\n• Acompanhamento de entrega\n• Nota fiscal e pagamento\n\nPara consultar, me informe o e-mail, telefone ou CNPJ da compra. Como posso ajudar?';
 
 // TTL do histórico: 24h (um dia de conversa por cliente)
 const SESSION_TTL_SECONDS = 24 * 60 * 60;
@@ -84,26 +84,28 @@ async function callGemini(history) {
   return res.data.candidates[0].content.parts[0].text;
 }
 
-// ===== WOOCOMMERCE (Opção B - endpoint próprio, compatível com HPOS) =====
+// ===== WOOCOMMERCE (busca por e-mail, telefone ou CNPJ) =====
 
-// Busca os pedidos do cliente pelo e-mail no endpoint próprio do WordPress
-async function getWooOrdersByEmail(email) {
+// Busca os pedidos por e-mail, telefone ou CNPJ (endpoint próprio)
+async function getWooOrdersByEmail(query) {
   try {
     if (!WOO_URL || !WOO_CONSUMER_KEY) {
       console.error('WooCommerce não configurado (faltam variáveis WOO_*)');
       return null;
     }
 
-    const url = `${WOO_URL}/wp-json/save/v1/orders?email=${encodeURIComponent(email)}`;
+    const params = new URLSearchParams();
+    if (query.email) params.set('email', query.email);
+    if (query.phone) params.set('phone', query.phone);
+    if (query.cnpj) params.set('cnpj', query.cnpj);
+
+    const url = `${WOO_URL}/wp-json/save/v1/orders?${params.toString()}`;
     const res = await axios.get(url, {
-      headers: {
-        'X-Save-Token': WOO_CONSUMER_KEY // token de proteção do endpoint
-      }
+      headers: { 'X-Save-Token': WOO_CONSUMER_KEY }
     });
 
     const orders = res.data;
     if (!orders || orders.length === 0) return null;
-
     return orders;
   } catch (e) {
     console.error('Erro ao buscar WooCommerce:', e.message);
@@ -158,26 +160,28 @@ app.post('/webhook', async (req, res) => {
     const history = await getHistory(phone);
     history.push({ role: 'user', parts: [{ text }] });
 
-    // --- 3. Detecta se a mensagem é sobre pedido/compra e busca no WooCommerce ---
-    const pedidoKeywords = /pedido|compra|entrega|status|rastreio|pagamento|nota|envio|meus pedidos|meu pedido/i;
+    // --- 3. Detecta pedido e extrai e-mail, telefone ou CNPJ ---
+    const pedidoKeywords = /pedido|compra|entrega|status|rastreio|pagamento|nota|envio|meus pedidos|meu pedido|fatura|nf|nota fiscal|boleto|quando chega|onde esta/i;
     let wooContext = '';
 
     if (pedidoKeywords.test(text)) {
-      // Tenta extrair um e-mail da mensagem, se o cliente informar
-      const emailMatch = text.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
-      const email = emailMatch ? emailMatch[0] : null;
+      const emailMatch  = text.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
+      const cnpjMatch   = text.match(/\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}/);
+      const phoneMatch  = text.match(/(?:\+?\d{2}[\s-]?)?\(?\d{2}\)?[\s-]?\d{4,5}[\s-]?\d{4}/);
 
-      if (email) {
-        // Cliente informou o e-mail na mensagem
-        const orders = await getWooOrdersByEmail(email);
+      const email = emailMatch ? emailMatch[0] : null;
+      const cnpj  = cnpjMatch ? cnpjMatch[0].replace(/[^\d]/g, '') : null;
+      const phoneNum = phoneMatch ? phoneMatch[0].replace(/[^\d]/g, '') : null;
+
+      if (email || cnpj || phoneNum) {
+        const orders = await getWooOrdersByEmail({ email, cnpj, phone: phoneNum });
         if (orders) {
-          wooContext = `\n\nDADOS DO CLIENTE (do WooCommerce, e-mail ${email}):\n${JSON.stringify(orders, null, 2)}\n\nUse esses dados para responder sobre os pedidos de forma amigável.`;
+          wooContext = `\n\nDADOS DO CLIENTE (do WooCommerce):\n${JSON.stringify(orders, null, 2)}\n\nUse esses dados para responder sobre os pedidos de forma amigável.`;
         } else {
-          wooContext = `\n\nNenhum pedido encontrado no WooCommerce para o e-mail ${email}. Informe o cliente educadamente que não encontramos pedidos vinculados a este e-mail e sugira verificar se digitou corretamente.`;
+          wooContext = `\n\nNenhum pedido encontrado no WooCommerce para os dados informados. Informe o cliente educadamente que não encontramos pedidos vinculados e sugira verificar se os dados estão corretos.`;
         }
       } else {
-        // Cliente não informou o e-mail — pede educadamente
-        wooContext = '\n\nO cliente perguntou sobre pedidos mas não informou o e-mail. Peça gentilmente que ele informe o e-mail cadastrado na compra para que você possa buscar os pedidos.';
+        wooContext = '\n\nO cliente perguntou sobre pedidos mas não informou e-mail, telefone ou CNPJ. Peça gentilmente que ele informe o e-mail cadastrado na compra, o telefone ou o CNPJ para que você possa buscar os pedidos.';
       }
     }
 

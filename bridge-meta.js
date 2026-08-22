@@ -1,4 +1,4 @@
-// bridge-meta.js - Versão melhorada com memória por cliente, saudação e persistência
+// bridge-meta.js - Versão com memória por cliente, saudação e integração WooCommerce (busca por e-mail)
 const express = require('express');
 const axios = require('axios');
 const { Redis } = require('@upstash/redis'); // Upstash Redis via REST/HTTPS
@@ -8,11 +8,16 @@ app.use(express.json());
 
 // ===== CONFIGURAÇÃO =====
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'Ba96350836??wasaveia_token_2026';
+const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'wasaveia_token_2026';
 const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN; // Token permanente
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || '1197397706799276';
 const AI_URL = process.env.AI_URL; // URL do Gemini
 const AI_API_KEY = process.env.AI_API_KEY;
+
+// WooCommerce
+const WOO_URL = process.env.WOO_URL;                 // https://seusite.com (sem barra no final)
+const WOO_CONSUMER_KEY = process.env.WOO_CONSUMER_KEY;
+const WOO_CONSUMER_SECRET = process.env.WOO_CONSUMER_SECRET;
 
 // Saudação fixa para primeiro contato
 const WELCOME_MESSAGE = 'Olá! Sou o Save, como posso ajudar?';
@@ -21,7 +26,6 @@ const WELCOME_MESSAGE = 'Olá! Sou o Save, como posso ajudar?';
 const SESSION_TTL_SECONDS = 24 * 60 * 60;
 
 // ===== CLIENTE REDIS (Upstash - via REST/HTTPS) =====
-// No painel do Upstash, copie UPSTASH_REDIS_REST_URL e UPSTASH_REDIS_REST_TOKEN
 const redis = new Redis({
   url: process.env.REDIS_URL,     // URL REST https://... do Upstash
   token: process.env.REDIS_TOKEN  // Token REST do Upstash
@@ -33,7 +37,7 @@ const redis = new Redis({
 async function getHistory(phone) {
   try {
     const data = await redis.get(`hist:${phone}`);
-    return data ? JSON.parse(data) : [];
+    return data ? data : []; // o Upstash já devolve o objeto pronto (sem JSON.parse)
   } catch (e) {
     console.error('Erro ao ler histórico:', e.message);
     return [];
@@ -81,6 +85,46 @@ async function callGemini(history) {
   return res.data.candidates[0].content.parts[0].text;
 }
 
+// ===== WOOCOMMERCE (busca por E-MAIL) =====
+
+// Busca os pedidos do cliente pelo e-mail
+async function getWooOrdersByEmail(email) {
+  try {
+    if (!WOO_URL || !WOO_CONSUMER_KEY || !WOO_CONSUMER_SECRET) {
+      console.error('WooCommerce não configurado (faltam variáveis WOO_*)');
+      return null;
+    }
+
+    // Busca pedidos filtrando por e-mail de cobrança (billing)
+    const url = `${WOO_URL}/wp-json/wc/v3/orders?search=${encodeURIComponent(email)}&per_page=5&status=any`;
+    const res = await axios.get(url, {
+      auth: {
+        username: WOO_CONSUMER_KEY,
+        password: WOO_CONSUMER_SECRET
+      }
+    });
+
+    const orders = res.data.filter(o =>
+      (o.billing?.email || '').toLowerCase() === email.toLowerCase()
+    );
+
+    if (orders.length === 0) return null;
+
+    // Resume os pedidos de forma legível para o Gemini
+    return orders.map(o => ({
+      numero: o.number,
+      status: o.status,
+      total: o.total,
+      data: o.date_created,
+      itens: o.line_items.map(i => `${i.name} (x${i.quantity})`),
+      endereco: o.shipping?.address_1 ? `${o.shipping.address_1}, ${o.shipping.city} - ${o.shipping.state}` : 'não informado'
+    }));
+  } catch (e) {
+    console.error('Erro ao buscar WooCommerce:', e.message);
+    return null;
+  }
+}
+
 // ===== WEBHOOK - Verificação (GET) =====
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -126,11 +170,40 @@ app.post('/webhook', async (req, res) => {
     const history = await getHistory(phone);
     history.push({ role: 'user', parts: [{ text }] });
 
-    // --- 3. Chama o Gemini com TODO o histórico do dia ---
-    const reply = await callGemini(history);
+    // --- 3. Detecta se a mensagem é sobre pedido/compra e busca no WooCommerce ---
+    const pedidoKeywords = /pedido|compra|entrega|status|rastreio|pagamento|nota|envio|meus pedidos|meu pedido/i;
+    let wooContext = '';
+
+    if (pedidoKeywords.test(text)) {
+      // Tenta extrair um e-mail da mensagem, se o cliente informar
+      const emailMatch = text.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
+      const email = emailMatch ? emailMatch[0] : null;
+
+      if (email) {
+        // Cliente informou o e-mail na mensagem
+        const orders = await getWooOrdersByEmail(email);
+        if (orders) {
+          wooContext = `\n\nDADOS DO CLIENTE (do WooCommerce, e-mail ${email}):\n${JSON.stringify(orders, null, 2)}\n\nUse esses dados para responder sobre os pedidos de forma amigável.`;
+        } else {
+          wooContext = `\n\nNenhum pedido encontrado no WooCommerce para o e-mail ${email}. Informe o cliente educadamente que não encontramos pedidos vinculados a este e-mail e sugira verificar se digitou corretamente.`;
+        }
+      } else {
+        // Cliente não informou o e-mail — pede educadamente
+        wooContext = '\n\nO cliente perguntou sobre pedidos mas não informou o e-mail. Peça gentilmente que ele informe o e-mail cadastrado na compra para que você possa buscar os pedidos.';
+      }
+    }
+
+    // --- 4. Adiciona o contexto do WooCommerce ao histórico do Gemini ---
+    const geminiHistory = [...history];
+    if (wooContext) {
+      geminiHistory.push({ role: 'user', parts: [{ text: `[Contexto do sistema]${wooContext}` }] });
+    }
+
+    // --- 5. Chama o Gemini com TODO o histórico do dia ---
+    const reply = await callGemini(geminiHistory);
     console.log(`Resposta do Gemini para ${phone}: ${reply}`);
 
-    // --- 4. Envia a resposta e salva no histórico ---
+    // --- 6. Envia a resposta e salva no histórico ---
     await sendWhatsApp(phone, reply);
     history.push({ role: 'model', parts: [{ text: reply }] });
     await saveHistory(phone, history);

@@ -1,14 +1,14 @@
 // bridge-meta.js - Versão melhorada com memória por cliente, saudação e persistência
 const express = require('express');
 const axios = require('axios');
-const { createClient } = require('redis'); // Redis/Upstash para persistência
+const { Redis } = require('@upstash/redis'); // Upstash Redis via REST/HTTPS
 
 const app = express();
 app.use(express.json());
 
 // ===== CONFIGURAÇÃO =====
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'Ba96350836??wasaveia_token_2026';
+const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'wasaveia_token_2026';
 const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN; // Token permanente
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || '1197397706799276';
 const AI_URL = process.env.AI_URL; // URL do Gemini
@@ -20,11 +20,12 @@ const WELCOME_MESSAGE = 'Olá! Sou o Save, como posso ajudar?';
 // TTL do histórico: 24h (um dia de conversa por cliente)
 const SESSION_TTL_SECONDS = 24 * 60 * 60;
 
-// ===== CLIENTE REDIS (Upstash) =====
-// Crie um banco Redis grátis em https://upstash.com e cole a URL na variável REDIS_URL
-const redis = createClient({ url: process.env.REDIS_URL });
-redis.on('error', (err) => console.error('Redis error:', err.message));
-redis.connect().then(() => console.log('Redis conectado ✅')).catch((e) => console.error('Falha ao conectar Redis:', e.message));
+// ===== CLIENTE REDIS (Upstash - via REST/HTTPS) =====
+// No painel do Upstash, copie UPSTASH_REDIS_REST_URL e UPSTASH_REDIS_REST_TOKEN
+const redis = new Redis({
+  url: process.env.REDIS_URL,     // URL REST https://... do Upstash
+  token: process.env.REDIS_TOKEN  // Token REST do Upstash
+});
 
 // ===== HELPERS =====
 
@@ -42,7 +43,7 @@ async function getHistory(phone) {
 // Salva o histórico do dia de um cliente (com TTL de 24h)
 async function saveHistory(phone, history) {
   try {
-    await redis.set(`hist:${phone}`, JSON.stringify(history), { EX: SESSION_TTL_SECONDS });
+    await redis.set(`hist:${phone}`, JSON.stringify(history), { ex: SESSION_TTL_SECONDS });
   } catch (e) {
     console.error('Erro ao salvar histórico:', e.message);
   }

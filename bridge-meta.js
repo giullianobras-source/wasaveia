@@ -105,7 +105,7 @@ async function getNuvemshopOrders(query) {
     }
 
     const headers = {
-      'Authorization': `bearer ${NUVEMSHOP_ACCESS_TOKEN}`,
+      'Authorization': `Bearer ${NUVEMSHOP_ACCESS_TOKEN}`,
       'Content-Type': 'application/json'
     };
     const base = `https://api.nuvemshop.com.br/v1/${NUVEMSHOP_STORE_ID}`;

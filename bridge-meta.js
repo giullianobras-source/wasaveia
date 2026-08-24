@@ -1,4 +1,4 @@
-// bridge-meta.js - Versão Nuvemshop: memória, saudação, busca de pedidos por e-mail/telefone/CNPJ e tratamento de erro de cota
+// bridge-meta.js - Versão Nuvemshop: memória, saudação, busca de pedidos por e-mail/telefone/CNPJ, rastreio e tratamento de erro de cota
 const express = require('express');
 const axios = require('axios');
 const { Redis } = require('@upstash/redis');
@@ -8,19 +8,28 @@ app.use(express.json());
 
 // ===== CONFIGURAÇÃO =====
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'Ba96350836??wasaveia_token_2026';
+const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'wasaveia_token_2026';
 const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || '1197397706799276';
 const AI_URL = process.env.AI_URL;
 const AI_API_KEY = process.env.AI_API_KEY;
 
 // Nuvemshop
-const NUVEMSHOP_STORE_ID = process.env.NUVEMSHOP_STORE_ID;        // ID da sua loja
-const NUVEMSHOP_ACCESS_TOKEN = process.env.NUVEMSHOP_ACCESS_TOKEN; // Token da API
+const NUVEMSHOP_STORE_ID = process.env.NUVEMSHOP_STORE_ID;
+const NUVEMSHOP_ACCESS_TOKEN = process.env.NUVEMSHOP_ACCESS_TOKEN;
 
-const WELCOME_MESSAGE = 'Olá! Sou o Save, assistente da Moobbile. 👋\n\nPosso te ajudar com:\n• Status do seu pedido\n• Acompanhamento de entrega\n• Nota fiscal e pagamento\n\nPara consultar, me informe o e-mail, telefone ou CNPJ da compra. Como posso ajudar?';
+const WELCOME_MESSAGE = 'Olá! 👋 Eu sou o Save, assistente da Moobbile.\n\nPosso te ajudar com:\n• Status do seu pedido\n• Acompanhamento de entrega\n• Nota fiscal e pagamento\n\nPara consultar, me informe o e-mail, telefone ou CPF da compra. Como posso ajudar?';
 
 const SESSION_TTL_SECONDS = 24 * 60 * 60;
+
+const SYSTEM_PROMPT = {
+  role: 'user',
+  parts: [{ text: `[Instrução do sistema] Você é o Save, assistente de atendimento da Moobbile.
+Seja cordial, direto e profissional. Ao informar dados de pedido, use formato claro com negrito (Data, Status, Item, Valor).
+NUNCA invente números de pedido, status, valores ou código de rastreio — use somente os dados fornecidos no contexto.
+Se o pedido tiver código de rastreio, informe-o junto com o link de acompanhamento quando disponível.
+Se não encontrar o pedido, informe educadamente e peça os dados corretos.` }]
+};
 
 const redis = new Redis({
   url: process.env.REDIS_URL,
@@ -94,9 +103,7 @@ async function callGemini(history) {
   throw lastError;
 }
 
-// ===== NUVEMSHOP (busca por e-mail, telefone ou CNPJ) =====
-
-// Busca pedidos na Nuvemshop
+// ===== NUVEMSHOP (busca por e-mail, telefone ou CNPJ + rastreio) =====
 async function getNuvemshopOrders(query) {
   try {
     if (!NUVEMSHOP_STORE_ID || !NUVEMSHOP_ACCESS_TOKEN) {
@@ -131,22 +138,31 @@ async function getNuvemshopOrders(query) {
     } else if (query.email) {
       orderParams.set('email', query.email);
     } else {
-      return null; // não achou cliente nem tem e-mail para filtrar
+      return null;
     }
 
     const orderRes = await axios.get(`${base}/orders?${orderParams.toString()}`, { headers });
     const orders = orderRes.data;
     if (!orders || orders.length === 0) return null;
 
-    // 3. Converte para o formato que o Gemini entende
-    return orders.map(o => ({
-      numero: o.number || o.id,
-      status: o.status,
-      total: o.total,
-      data: o.created_at,
-      itens: (o.products || []).map(p => `${p.name} (x${p.quantity})`),
-      endereco: o.shipping?.receiver_address || 'não informado'
-    }));
+    // 3. Converte para o formato que o Gemini entende — com rastreio
+    return orders.map(o => {
+      const fulfillment = (o.fulfillments && o.fulfillments[0]) || null;
+      const rastreio = o.shipping?.tracking_number || fulfillment?.tracking_info?.code || null;
+      const rastreioUrl = o.shipping?.tracking_url || fulfillment?.tracking_info?.url || null;
+
+      return {
+        numero: o.number || o.id,
+        status: o.status,
+        shipping_status: o.shipping_status || 'não informado',
+        total: o.total,
+        data: o.created_at,
+        itens: (o.products || []).map(p => `${p.name} (x${p.quantity})`),
+        endereco: o.shipping?.receiver_address || 'não informado',
+        rastreio: rastreio || 'não informado',
+        rastreio_url: rastreioUrl || 'não informado'
+      };
+    });
   } catch (e) {
     console.error('Erro ao buscar Nuvemshop:', e.message);
     if (e.response) console.error('Status:', e.response.status, 'Detalhe:', JSON.stringify(e.response.data));
@@ -197,7 +213,7 @@ app.post('/webhook', async (req, res) => {
     history.push({ role: 'user', parts: [{ text }] });
 
     // Detecta pedido e extrai e-mail, telefone ou CNPJ
-    const pedidoKeywords = /pedido|compra|entrega|status|rastreio|pagamento|nota|envio|meus pedidos|meu pedido|fatura|nf|nota fiscal|boleto|quando chega|onde esta/i;
+    const pedidoKeywords = /pedido|compra|entrega|status|rastreio|pagamento|nota|envio|meus pedidos|meu pedido|fatura|nf|nota fiscal|boleto|quando chega|onde esta|cade minha compra|cadê minha compra|meu pedido chegou|chegou|foi enviado|ja foi enviado|ja chegou|quando chega meu|acompanhar|rastrear|cpf|email|e-mail|telefone/i;
     let nuvemContext = '';
 
     if (pedidoKeywords.test(text)) {
@@ -212,7 +228,7 @@ app.post('/webhook', async (req, res) => {
       if (email || cnpj || phoneNum) {
         const orders = await getNuvemshopOrders({ email, cnpj, phone: phoneNum });
         if (orders) {
-          nuvemContext = `\n\nDADOS DO CLIENTE (da Nuvemshop):\n${JSON.stringify(orders, null, 2)}\n\nUse esses dados para responder sobre os pedidos de forma amigável.`;
+          nuvemContext = `\n\nDADOS DO CLIENTE (da Nuvemshop):\n${JSON.stringify(orders, null, 2)}\n\nUse esses dados para responder sobre os pedidos de forma amigável, incluindo código de rastreio quando existir.`;
         } else {
           nuvemContext = `\n\nNenhum pedido encontrado na Nuvemshop para os dados informados. Informe o cliente educadamente que não encontramos pedidos vinculados e sugira verificar se os dados estão corretos.`;
         }
@@ -221,7 +237,7 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
-    const geminiHistory = [...history];
+    const geminiHistory = [SYSTEM_PROMPT, ...history];
     if (nuvemContext) {
       geminiHistory.push({ role: 'user', parts: [{ text: `[Contexto do sistema]${nuvemContext}` }] });
     }

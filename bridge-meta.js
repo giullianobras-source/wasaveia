@@ -1,4 +1,4 @@
-// bridge-meta.js - Versão Nuvemshop: memória, saudação, busca de pedidos por e-mail/telefone/CNPJ, rastreio e tratamento de erro de cota
+// bridge-meta.js - Ponte Meta (WhatsApp) + Gemini + Nuvemshop
 const express = require('express');
 const axios = require('axios');
 const { Redis } = require('@upstash/redis');
@@ -8,7 +8,7 @@ app.use(express.json());
 
 // ===== CONFIGURAÇÃO =====
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'Ba96350836??wasaveia_token_2026';
+const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'wasaveia_token_2026';
 const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || '1197397706799276';
 const AI_URL = process.env.AI_URL;
@@ -18,13 +18,16 @@ const AI_API_KEY = process.env.AI_API_KEY;
 const NUVEMSHOP_STORE_ID = process.env.NUVEMSHOP_STORE_ID;
 const NUVEMSHOP_ACCESS_TOKEN = process.env.NUVEMSHOP_ACCESS_TOKEN;
 
-const WELCOME_MESSAGE = 'Olá! 👋 Eu sou o Save, assistente da Moobbile.\n\nPosso te ajudar com:\n• Status do seu pedido\n• Acompanhamento de entrega\n• Nota fiscal e pagamento\n\nPara consultar, me informe o e-mail, telefone ou CPF da compra. Como posso ajudar?';
+// ===== NOME DA LOJA (troque aqui se "Wasa Veia" estiver errado) =====
+const LOJA_NOME = 'Wasa Veia';
+
+const WELCOME_MESSAGE = `Olá! 👋 Eu sou o Save, assistente da ${LOJA_NOME}.\n\nPosso te ajudar com:\n• Status do seu pedido\n• Acompanhamento de entrega\n• Nota fiscal e pagamento\n\nPara consultar, me informe o e-mail, telefone ou CPF da compra. Como posso ajudar?`;
 
 const SESSION_TTL_SECONDS = 24 * 60 * 60;
 
 const SYSTEM_PROMPT = {
   role: 'user',
-  parts: [{ text: `[Instrução do sistema] Você é o Save, assistente de atendimento da Moobbile.
+  parts: [{ text: `[Instrução do sistema] Você é o Save, assistente de atendimento da ${LOJA_NOME}.
 Seja cordial, direto e profissional. Ao informar dados de pedido, use formato claro com negrito (Data, Status, Item, Valor).
 NUNCA invente números de pedido, status, valores ou código de rastreio — use somente os dados fornecidos no contexto.
 Se o pedido tiver código de rastreio, informe-o junto com o link de acompanhamento quando disponível.
@@ -131,21 +134,39 @@ async function getNuvemshopOrders(query) {
       }
     }
 
-    // 2. Busca os pedidos do cliente
-    const orderParams = new URLSearchParams();
+    let orders = [];
+
     if (customer) {
-      orderParams.set('customer_id', customer.id);
+      // Cliente encontrado: busca SÓ os pedidos dele (paginação completa)
+      let page = 1;
+      while (true) {
+        const res = await axios.get(`${base}/orders?customer_id=${customer.id}&page=${page}&per_page=200`, { headers });
+        const data = res.data || [];
+        orders = orders.concat(data);
+        if (data.length < 200) break;
+        page++;
+      }
     } else if (query.email) {
-      orderParams.set('email', query.email);
+      // Cliente NÃO encontrado: a API ignora o filtro email em /orders (devolve tudo).
+      // Então busca os pedidos e FILTRA no código pelo e-mail exato.
+      let page = 1;
+      while (true) {
+        const res = await axios.get(`${base}/orders?page=${page}&per_page=200`, { headers });
+        const data = res.data || [];
+        orders = orders.concat(
+          data.filter(o => o.customer && o.customer.email &&
+            o.customer.email.toLowerCase() === query.email.toLowerCase())
+        );
+        if (data.length < 200) break;
+        page++;
+      }
     } else {
       return null;
     }
 
-    const orderRes = await axios.get(`${base}/orders?${orderParams.toString()}`, { headers });
-    const orders = orderRes.data;
-    if (!orders || orders.length === 0) return null;
+    if (orders.length === 0) return null;
 
-    // 3. Converte para o formato que o Gemini entende — com rastreio
+    // 2. Converte para o formato que o Gemini entende — com rastreio
     return orders.map(o => {
       const fulfillment = (o.fulfillments && o.fulfillments[0]) || null;
       const rastreio = o.shipping?.tracking_number || fulfillment?.tracking_info?.code || null;
@@ -212,13 +233,11 @@ app.post('/webhook', async (req, res) => {
     const history = await getHistory(phone);
     history.push({ role: 'user', parts: [{ text }] });
 
-    // === CORREÇÃO: extrai os dados ANTES de decidir ===
-    // Assim a busca funciona mesmo se o cliente mandar só o e-mail, CPF ou telefone,
-    // sem precisar escrever "pedido" ou "status".
+    // === DETECÇÃO: dispara com palavra-chave OU com dados (e-mail/CPF/telefone) ===
     const pedidoKeywords = /pedido|compra|entrega|status|rastreio|pagamento|nota|envio|meus pedidos|meu pedido|fatura|nf|nota fiscal|boleto|quando chega|onde esta|cade minha compra|cadê minha compra|meu pedido chegou|chegou|foi enviado|ja foi enviado|ja chegou|quando chega meu|acompanhar|rastrear|cpf|email|e-mail|telefone/i;
     let nuvemContext = '';
 
-    // Extrai e-mail, CPF/CNPJ e telefone da mensagem
+    // Extrai e-mail, CPF/CNPJ e telefone ANTES de decidir
     const emailMatch = text.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
     const cnpjMatch  = text.match(/\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}/);
 
@@ -232,7 +251,6 @@ app.post('/webhook', async (req, res) => {
     const temPalavraChave = pedidoKeywords.test(text);
     const temDado = !!(email || cnpj || phoneNum);
 
-    // Dispara a busca se houver palavra-chave OU qualquer dado identificável
     if (temPalavraChave || temDado) {
       if (temDado) {
         const orders = await getNuvemshopOrders({ email, cnpj, phone: phoneNum });

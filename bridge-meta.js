@@ -8,7 +8,7 @@ app.use(express.json());
 
 // ===== CONFIGURAÇÃO =====
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'Ba96350836??wasaveia_token_2026';
+const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'wasaveia_token_2026';
 const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || '1197397706799276';
 const AI_URL = process.env.AI_URL;
@@ -128,7 +128,7 @@ async function getNuvemshopOrders(query) {
     };
     const base = `https://api.nuvemshop.com.br/v1/${NUVEMSHOP_STORE_ID}`;
 
-    // 1. Procura o cliente por e-mail, telefone ou CNPJ
+    // 1. Procura o cliente por e-mail, telefone ou documento (CPF/CNPJ)
     let customer = null;
     const customerParams = new URLSearchParams();
     if (query.email) customerParams.set('email', query.email);
@@ -146,7 +146,7 @@ async function getNuvemshopOrders(query) {
     let orders = [];
 
     if (customer) {
-      // Cliente encontrado: busca os pedidos pelo customer_id
+      // Cliente encontrado: busca SÓ os pedidos dele (paginação completa)
       let page = 1;
       while (true) {
         const res = await axios.get(`${base}/orders?customer_id=${customer.id}&page=${page}&per_page=200`, { headers });
@@ -157,8 +157,8 @@ async function getNuvemshopOrders(query) {
       }
       console.log(`[NUVEM] Pedidos via customer_id=${customer.id}: ${orders.length} retornados`);
     } else if (query.email) {
-      // Cliente NÃO encontrado: a API ignora email em /orders.
-      // Busca os pedidos e FILTRA no código (pedido por pedido).
+      // Cliente NÃO encontrado: a API ignora email em /orders (devolve tudo).
+      // Busca os pedidos e FILTRA no código pelo e-mail exato.
       let page = 1;
       while (true) {
         const res = await axios.get(`${base}/orders?page=${page}&per_page=200`, { headers });
@@ -194,7 +194,7 @@ async function getNuvemshopOrders(query) {
       });
     }
 
-    console.log(`[NUVEM] Após filtro: ${filtered.length} pedidos do cliente consultado`);
+    console.log(`[NUVEM] Após filtro: ${filtered.length} pedido(s) do cliente consultado`);
     if (filtered.length > 0) {
       filtered.forEach(o => console.log(`[NUVEM] Pedido #${o.number || o.id} -> cliente: ${o.customer ? o.customer.email : 'sem email'}`));
     }
@@ -272,24 +272,25 @@ app.post('/webhook', async (req, res) => {
     const pedidoKeywords = /pedido|compra|entrega|status|rastreio|pagamento|nota|envio|meus pedidos|meu pedido|fatura|nf|nota fiscal|boleto|quando chega|onde esta|cade minha compra|cadê minha compra|meu pedido chegou|chegou|foi enviado|ja foi enviado|ja chegou|quando chega meu|acompanhar|rastrear|cpf|email|e-mail|telefone/i;
     let nuvemContext = '';
 
+    // === CORREÇÃO CPF: aceita CPF (11 dígitos) OU CNPJ (14 dígitos), com ou sem máscara ===
+    const docMatch = text.match(/(?:\d{3}\.?\d{3}\.?\d{3}-?\d{2}|\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2})/);
+    const doc = docMatch ? docMatch[0].replace(/[^\d]/g, '') : null;
+
     const emailMatch = text.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
-    const cnpjMatch  = text.match(/\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}/);
-
     const email = emailMatch ? emailMatch[0] : null;
-    const cnpj  = cnpjMatch ? cnpjMatch[0].replace(/[^\d]/g, '') : null;
 
-    const phoneMatch = cnpj ? null : text.match(/(?:\+?\d{2}[\s-]?)?\(?\d{2}\)?[\s-]?\d{4,5}[\s-]?\d{4}/);
+    // Só procura telefone se NÃO houver documento (evita confundir CPF com telefone)
+    const phoneMatch = doc ? null : text.match(/(?:\+?\d{2}[\s-]?)?\(?\d{2}\)?[\s-]?\d{4,5}[\s-]?\d{4}/);
     const phoneNum = phoneMatch ? phoneMatch[0].replace(/[^\d]/g, '') : null;
 
     const temPalavraChave = pedidoKeywords.test(text);
-    const temDado = !!(email || cnpj || phoneNum);
+    const temDado = !!(email || doc || phoneNum);
 
     if (temPalavraChave || temDado) {
       if (temDado) {
-        const orders = await getNuvemshopOrders({ email, cnpj, phone: phoneNum });
+        const orders = await getNuvemshopOrders({ email, cnpj: doc, phone: phoneNum });
         if (orders) {
           nuvemContext = `\n\nDADOS DO CLIENTE (da Nuvemshop):\n${JSON.stringify(orders, null, 2)}\n\nUse esses dados para responder sobre os pedidos de forma amigável, incluindo código de rastreio quando existir.`;
-          // Limpa o histórico antigo para o Gemini NÃO repetir respostas velhas
           history = [{ role: 'user', parts: [{ text }] }];
           await clearHistory(phone);
           console.log(`[NUVEM] Histórico limpo. Contexto gerado com ${orders.length} pedido(s).`);
@@ -297,7 +298,7 @@ app.post('/webhook', async (req, res) => {
           nuvemContext = `\n\nNenhum pedido encontrado na Nuvemshop para os dados informados. Informe o cliente educadamente que não encontramos pedidos vinculados e sugira verificar se os dados estão corretos.`;
         }
       } else {
-        nuvemContext = '\n\nO cliente perguntou sobre pedidos mas não informou e-mail, telefone ou CNPJ. Peça gentilmente que ele informe o e-mail cadastrado na compra, o telefone ou o CNPJ para que você possa buscar os pedidos.';
+        nuvemContext = '\n\nO cliente perguntou sobre pedidos mas não informou e-mail, telefone ou CPF. Peça gentilmente que ele informe o e-mail cadastrado na compra, o telefone ou o CPF para que você possa buscar os pedidos.';
       }
     }
 
@@ -313,7 +314,7 @@ app.post('/webhook', async (req, res) => {
     } catch (e) {
       const status = e.response?.status;
       console.error(`Falha ao chamar Gemini (${status}):`, e.message);
-      reply = '😅 Estou com um pico de atendimento agora e não consegui processar sua mensagem. Por favor, tente novamente em instantes. Se preferir, me mande o e-mail, telefone ou CNPJ da compra que eu verifico seu pedido assim que voltar.';
+      reply = '😅 Estou com um pico de atendimento agora e não consegui processar sua mensagem. Por favor, tente novamente em instantes. Se preferir, me mande o e-mail, telefone ou CPF da compra que eu verifico seu pedido assim que voltar.';
     }
 
     await sendWhatsApp(phone, reply);

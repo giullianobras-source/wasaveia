@@ -8,7 +8,7 @@ app.use(express.json());
 
 // ===== CONFIGURAÇÃO =====
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'Ba96350836??wasaveia_token_2026';
+const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'wasaveia_token_2026';
 const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || '1197397706799276';
 const AI_URL = process.env.AI_URL;
@@ -18,18 +18,18 @@ const AI_API_KEY = process.env.AI_API_KEY;
 const NUVEMSHOP_STORE_ID = process.env.NUVEMSHOP_STORE_ID;
 const NUVEMSHOP_ACCESS_TOKEN = process.env.NUVEMSHOP_ACCESS_TOKEN;
 
-// ===== NOME DA LOJA (troque aqui se "Wasa Veia" estiver errado) =====
-const LOJA_NOME = 'Wasa Veia';
+const LOJA_NOME = 'SaveMax';
 
-const WELCOME_MESSAGE = `Olá! 👋 Eu sou o Save, assistente da SaveMax.\n\nPosso te ajudar com:\n• Status do seu pedido\n• Acompanhamento de entrega\n• Nota fiscal e pagamento\n\nPara consultar, me informe o e-mail, telefone ou CPF da compra. Como posso ajudar?`;
+const WELCOME_MESSAGE = `Olá! 👋 Eu sou o Save, assistente da ${LOJA_NOME}.\n\nPosso te ajudar com:\n• Status do seu pedido\n• Acompanhamento de entrega\n• Nota fiscal e pagamento\n\nPara consultar, me informe o e-mail, telefone ou CPF da compra. Como posso ajudar?`;
 
 const SESSION_TTL_SECONDS = 24 * 60 * 60;
 
 const SYSTEM_PROMPT = {
   role: 'user',
-  parts: [{ text: `[Instrução do sistema] Você é o Save, assistente de atendimento da SaveMax.
+  parts: [{ text: `[Instrução do sistema] Você é o Save, assistente de atendimento da ${LOJA_NOME}.
 Seja cordial, direto e profissional. Ao informar dados de pedido, use formato claro com negrito (Data, Status, Item, Valor).
-NUNCA invente números de pedido, status, valores ou código de rastreio — use somente os dados fornecidos no contexto.
+NUNCA invente números de pedido, status, valores ou código de rastreio — use SOMENTE os dados do bloco [Contexto do sistema] mais recente.
+Se um pedido não estiver no contexto, não o mencione.
 Se o pedido tiver código de rastreio, informe-o junto com o link de acompanhamento quando disponível.
 Se não encontrar o pedido, informe educadamente e peça os dados corretos.` }]
 };
@@ -55,6 +55,14 @@ async function saveHistory(phone, history) {
     await redis.set(`hist:${phone}`, JSON.stringify(history), { ex: SESSION_TTL_SECONDS });
   } catch (e) {
     console.error('Erro ao salvar histórico:', e.message);
+  }
+}
+
+async function clearHistory(phone) {
+  try {
+    await redis.del(`hist:${phone}`);
+  } catch (e) {
+    console.error('Erro ao limpar histórico:', e.message);
   }
 }
 
@@ -106,7 +114,7 @@ async function callGemini(history) {
   throw lastError;
 }
 
-// ===== NUVEMSHOP (busca por e-mail, telefone ou CNPJ + rastreio) =====
+// ===== NUVEMSHOP =====
 async function getNuvemshopOrders(query) {
   try {
     if (!NUVEMSHOP_STORE_ID || !NUVEMSHOP_ACCESS_TOKEN) {
@@ -132,12 +140,13 @@ async function getNuvemshopOrders(query) {
       if (custRes.data && custRes.data.length > 0) {
         customer = custRes.data[0];
       }
+      console.log(`[NUVEM] Cliente buscado por ${customerParams.toString()} -> encontrado: ${customer ? `id ${customer.id} (${customer.name})` : 'NÃO encontrado'}`);
     }
 
     let orders = [];
 
     if (customer) {
-      // Cliente encontrado: busca SÓ os pedidos dele (paginação completa)
+      // Cliente encontrado: busca os pedidos pelo customer_id
       let page = 1;
       while (true) {
         const res = await axios.get(`${base}/orders?customer_id=${customer.id}&page=${page}&per_page=200`, { headers });
@@ -146,28 +155,54 @@ async function getNuvemshopOrders(query) {
         if (data.length < 200) break;
         page++;
       }
+      console.log(`[NUVEM] Pedidos via customer_id=${customer.id}: ${orders.length} retornados`);
     } else if (query.email) {
-      // Cliente NÃO encontrado: a API ignora o filtro email em /orders (devolve tudo).
-      // Então busca os pedidos e FILTRA no código pelo e-mail exato.
+      // Cliente NÃO encontrado: a API ignora email em /orders.
+      // Busca os pedidos e FILTRA no código (pedido por pedido).
       let page = 1;
       while (true) {
         const res = await axios.get(`${base}/orders?page=${page}&per_page=200`, { headers });
         const data = res.data || [];
-        orders = orders.concat(
-          data.filter(o => o.customer && o.customer.email &&
-            o.customer.email.toLowerCase() === query.email.toLowerCase())
-        );
+        orders = orders.concat(data);
         if (data.length < 200) break;
         page++;
       }
+      console.log(`[NUVEM] Busca sem cliente: ${orders.length} pedidos brutos na loja`);
     } else {
       return null;
     }
 
-    if (orders.length === 0) return null;
+    // ===== FILTRO DEFENSIVO: só mantém pedidos do cliente consultado =====
+    let filtered = orders;
+    if (query.email) {
+      const em = query.email.toLowerCase().trim();
+      filtered = filtered.filter(o => o.customer && o.customer.email &&
+        o.customer.email.toLowerCase().trim() === em);
+    } else if (query.cnpj) {
+      const cnpjLimpo = query.cnpj.replace(/[^\d]/g, '');
+      filtered = filtered.filter(o => {
+        const idCli = o.customer && o.customer.identification;
+        if (!idCli) return false;
+        return idCli.replace(/[^\d]/g, '') === cnpjLimpo;
+      });
+    } else if (query.phone) {
+      const telLimpo = query.phone.replace(/[^\d]/g, '');
+      filtered = filtered.filter(o => {
+        const telCli = o.customer && o.customer.phone;
+        if (!telCli) return false;
+        return telCli.replace(/[^\d]/g, '').includes(telLimpo.slice(-10)) || telLimpo.includes(telCli.replace(/[^\d]/g, '').slice(-10));
+      });
+    }
+
+    console.log(`[NUVEM] Após filtro: ${filtered.length} pedidos do cliente consultado`);
+    if (filtered.length > 0) {
+      filtered.forEach(o => console.log(`[NUVEM] Pedido #${o.number || o.id} -> cliente: ${o.customer ? o.customer.email : 'sem email'}`));
+    }
+
+    if (filtered.length === 0) return null;
 
     // 2. Converte para o formato que o Gemini entende — com rastreio
-    return orders.map(o => {
+    return filtered.map(o => {
       const fulfillment = (o.fulfillments && o.fulfillments[0]) || null;
       const rastreio = o.shipping?.tracking_number || fulfillment?.tracking_info?.code || null;
       const rastreioUrl = o.shipping?.tracking_url || fulfillment?.tracking_info?.url || null;
@@ -230,21 +265,19 @@ app.post('/webhook', async (req, res) => {
       console.log(`Saudação enviada para ${phone}`);
     }
 
-    const history = await getHistory(phone);
+    let history = await getHistory(phone);
     history.push({ role: 'user', parts: [{ text }] });
 
     // === DETECÇÃO: dispara com palavra-chave OU com dados (e-mail/CPF/telefone) ===
     const pedidoKeywords = /pedido|compra|entrega|status|rastreio|pagamento|nota|envio|meus pedidos|meu pedido|fatura|nf|nota fiscal|boleto|quando chega|onde esta|cade minha compra|cadê minha compra|meu pedido chegou|chegou|foi enviado|ja foi enviado|ja chegou|quando chega meu|acompanhar|rastrear|cpf|email|e-mail|telefone/i;
     let nuvemContext = '';
 
-    // Extrai e-mail, CPF/CNPJ e telefone ANTES de decidir
     const emailMatch = text.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
     const cnpjMatch  = text.match(/\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}/);
 
     const email = emailMatch ? emailMatch[0] : null;
     const cnpj  = cnpjMatch ? cnpjMatch[0].replace(/[^\d]/g, '') : null;
 
-    // Se achou CPF, evita que os mesmos dígitos sejam tratados como telefone
     const phoneMatch = cnpj ? null : text.match(/(?:\+?\d{2}[\s-]?)?\(?\d{2}\)?[\s-]?\d{4,5}[\s-]?\d{4}/);
     const phoneNum = phoneMatch ? phoneMatch[0].replace(/[^\d]/g, '') : null;
 
@@ -256,6 +289,10 @@ app.post('/webhook', async (req, res) => {
         const orders = await getNuvemshopOrders({ email, cnpj, phone: phoneNum });
         if (orders) {
           nuvemContext = `\n\nDADOS DO CLIENTE (da Nuvemshop):\n${JSON.stringify(orders, null, 2)}\n\nUse esses dados para responder sobre os pedidos de forma amigável, incluindo código de rastreio quando existir.`;
+          // Limpa o histórico antigo para o Gemini NÃO repetir respostas velhas
+          history = [{ role: 'user', parts: [{ text }] }];
+          await clearHistory(phone);
+          console.log(`[NUVEM] Histórico limpo. Contexto gerado com ${orders.length} pedido(s).`);
         } else {
           nuvemContext = `\n\nNenhum pedido encontrado na Nuvemshop para os dados informados. Informe o cliente educadamente que não encontramos pedidos vinculados e sugira verificar se os dados estão corretos.`;
         }

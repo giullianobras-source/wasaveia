@@ -212,20 +212,29 @@ app.post('/webhook', async (req, res) => {
     const history = await getHistory(phone);
     history.push({ role: 'user', parts: [{ text }] });
 
-    // Detecta pedido e extrai e-mail, telefone ou CNPJ
+    // === CORREÇÃO: extrai os dados ANTES de decidir ===
+    // Assim a busca funciona mesmo se o cliente mandar só o e-mail, CPF ou telefone,
+    // sem precisar escrever "pedido" ou "status".
     const pedidoKeywords = /pedido|compra|entrega|status|rastreio|pagamento|nota|envio|meus pedidos|meu pedido|fatura|nf|nota fiscal|boleto|quando chega|onde esta|cade minha compra|cadê minha compra|meu pedido chegou|chegou|foi enviado|ja foi enviado|ja chegou|quando chega meu|acompanhar|rastrear|cpf|email|e-mail|telefone/i;
     let nuvemContext = '';
 
-    if (pedidoKeywords.test(text)) {
-      const emailMatch  = text.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
-      const cnpjMatch   = text.match(/\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}/);
-      const phoneMatch  = text.match(/(?:\+?\d{2}[\s-]?)?\(?\d{2}\)?[\s-]?\d{4,5}[\s-]?\d{4}/);
+    // Extrai e-mail, CPF/CNPJ e telefone da mensagem
+    const emailMatch = text.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
+    const cnpjMatch  = text.match(/\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}/);
 
-      const email = emailMatch ? emailMatch[0] : null;
-      const cnpj  = cnpjMatch ? cnpjMatch[0].replace(/[^\d]/g, '') : null;
-      const phoneNum = phoneMatch ? phoneMatch[0].replace(/[^\d]/g, '') : null;
+    const email = emailMatch ? emailMatch[0] : null;
+    const cnpj  = cnpjMatch ? cnpjMatch[0].replace(/[^\d]/g, '') : null;
 
-      if (email || cnpj || phoneNum) {
+    // Se achou CPF, evita que os mesmos dígitos sejam tratados como telefone
+    const phoneMatch = cnpj ? null : text.match(/(?:\+?\d{2}[\s-]?)?\(?\d{2}\)?[\s-]?\d{4,5}[\s-]?\d{4}/);
+    const phoneNum = phoneMatch ? phoneMatch[0].replace(/[^\d]/g, '') : null;
+
+    const temPalavraChave = pedidoKeywords.test(text);
+    const temDado = !!(email || cnpj || phoneNum);
+
+    // Dispara a busca se houver palavra-chave OU qualquer dado identificável
+    if (temPalavraChave || temDado) {
+      if (temDado) {
         const orders = await getNuvemshopOrders({ email, cnpj, phone: phoneNum });
         if (orders) {
           nuvemContext = `\n\nDADOS DO CLIENTE (da Nuvemshop):\n${JSON.stringify(orders, null, 2)}\n\nUse esses dados para responder sobre os pedidos de forma amigável, incluindo código de rastreio quando existir.`;

@@ -21,13 +21,13 @@ const NUVEMSHOP_ACCESS_TOKEN = process.env.NUVEMSHOP_ACCESS_TOKEN;
 // ===== NOME DA LOJA (troque aqui se "Wasa Veia" estiver errado) =====
 const LOJA_NOME = 'Wasa Veia';
 
-const WELCOME_MESSAGE = `Olá! 👋 Eu sou o Save, assistente da ${LOJA_NOME}.\n\nPosso te ajudar com:\n• Status do seu pedido\n• Acompanhamento de entrega\n• Nota fiscal e pagamento\n\nPara consultar, me informe o e-mail, telefone ou CPF da compra. Como posso ajudar?`;
+const WELCOME_MESSAGE = `Olá! 👋 Eu sou o Save, assistente da SaveMax.\n\nPosso te ajudar com:\n• Status do seu pedido\n• Acompanhamento de entrega\n• Nota fiscal e pagamento\n\nPara consultar, me informe o e-mail, telefone ou CPF da compra. Como posso ajudar?`;
 
 const SESSION_TTL_SECONDS = 24 * 60 * 60;
 
 const SYSTEM_PROMPT = {
   role: 'user',
-  parts: [{ text: `[Instrução do sistema] Você é o Save, assistente de atendimento da ${LOJA_NOME}.
+  parts: [{ text: `[Instrução do sistema] Você é o Save, assistente de atendimento da SaveMax.
 Seja cordial, direto e profissional. Ao informar dados de pedido, use formato claro com negrito (Data, Status, Item, Valor).
 NUNCA invente números de pedido, status, valores ou código de rastreio — use somente os dados fornecidos no contexto.
 Se o pedido tiver código de rastreio, informe-o junto com o link de acompanhamento quando disponível.

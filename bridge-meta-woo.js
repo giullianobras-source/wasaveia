@@ -116,6 +116,19 @@ async function callGemini(history) {
 const WOO_KEYS_META = ['_billing_cpf', 'billing_cpf', '_billing_cnpj', 'billing_cnpj', '_billing_cpf_cnpj', 'billing_cpf_cnpj'];
 
 function normDigits(s) { return String(s || '').replace(/\D/g, ''); }
+
+function isValidCpf(cpf) {
+  if (!cpf || cpf.length !== 11 || /^(\d)\1{10}$/.test(cpf)) return false;
+  let s = 0;
+  for (let i = 0; i < 9; i++) s += parseInt(cpf[i]) * (10 - i);
+  let d1 = 11 - (s % 11); if (d1 >= 10) d1 = 0;
+  if (d1 !== parseInt(cpf[9])) return false;
+  s = 0;
+  for (let i = 0; i < 10; i++) s += parseInt(cpf[i]) * (11 - i);
+  let d2 = 11 - (s % 11); if (d2 >= 10) d2 = 0;
+  return d2 === parseInt(cpf[10]);
+}
+
 function dedupeOrders(arr) { return [...new Map(arr.map(o => [o.id, o])).values()]; }
 function orderMeta(ord, key) {
   for (const m of (ord.meta_data || [])) {
@@ -163,7 +176,7 @@ async function wooRecentDays(days, maxPages) {
   const after = new Date(Date.now() - days * 86400000).toISOString();
   const out = [];
   let page = 1;
-  maxPages = maxPages || 15;
+  maxPages = maxPages || 30;
   while (page <= maxPages) {
     const data = await wooGet('/orders', { after, per_page: 100, page });
     out.push(...data);
@@ -195,7 +208,7 @@ async function getWooOrders(query) {
       }
       orders = dedupeOrders(orders).filter(o => matchDoc(o, docDigits));
       if (!orders.length) {
-        orders = (await wooRecentDays(365)).filter(o => matchDoc(o, docDigits));
+        orders = (await wooRecentDays(730, 30)).filter(o => matchDoc(o, docDigits));
         console.log('[WOO] Documento por varredura: ' + orders.length + ' pedido(s)');
       }
       console.log('[WOO] Busca por documento (' + docDigits.length + ' digitos): ' + orders.length + ' pedido(s)');
@@ -218,7 +231,7 @@ async function getWooOrders(query) {
 
     // 3) TELEFONE: varredura recente + filtro por billing.phone
     if (!orders.length && phoneDigits && phoneDigits.length >= 10) {
-      orders = (await wooRecentDays(365)).filter(o => {
+      orders = (await wooRecentDays(730, 30)).filter(o => {
         const t = normDigits(o.billing && o.billing.phone);
         const a = phoneDigits.slice(-10);
         const b = t ? t.slice(-10) : '';
@@ -310,14 +323,20 @@ app.post('/webhook', async (req, res) => {
     const pedidoKeywords = /pedido|compra|entrega|status|rastreio|pagamento|nota|envio|meus pedidos|meu pedido|fatura|nf|nota fiscal|boleto|quando chega|onde esta|cade minha compra|cadê minha compra|meu pedido chegou|chegou|foi enviado|ja foi enviado|ja chegou|quando chega meu|acompanhar|rastrear|cpf|email|e-mail|telefone/i;
     let wooContext = '';
 
-    // CORREÇÃO CPF: aceita CPF (11 dígitos) OU CNPJ (14 dígitos), com ou sem máscara
-    const docMatch = text.match(/(?:\d{3}\.?\d{3}\.?\d{3}-?\d{2}|\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2})/);
-    const doc = docMatch ? docMatch[0].replace(/[^\d]/g, '') : null;
+    // DETECÇÃO: e-mail sempre; documento vs telefone por contagem de dígitos + validação de CPF
     const emailMatch = text.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
     const email = emailMatch ? emailMatch[0] : null;
-    // Só telefone se NÃO houver documento (evita confundir CPF com telefone)
-    const phoneMatch = doc ? null : text.match(/(?:\+?\d{2}[\s-]?)?\(?\d{2}\)?[\s-]?\d{4,5}[\s-]?\d{4}/);
-    const phoneNum = phoneMatch ? phoneMatch[0].replace(/[^\d]/g, '') : null;
+    let digitos = text.replace(/\D/g, '');
+    if ((digitos.length === 12 || digitos.length === 13) && digitos.startsWith('55')) digitos = digitos.slice(2);
+    let doc = null;
+    let phoneNum = null;
+    if (digitos.length === 14) {
+      doc = digitos; // CNPJ
+    } else if (digitos.length === 11) {
+      if (isValidCpf(digitos)) { doc = digitos; } else { phoneNum = digitos; }
+    } else if (digitos.length === 10) {
+      phoneNum = digitos;
+    }
     const temPalavraChave = pedidoKeywords.test(text);
     const temDado = !!(email || doc || phoneNum);
 

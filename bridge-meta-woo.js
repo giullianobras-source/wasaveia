@@ -246,7 +246,7 @@ async function getWooOrders(query) {
 
     // 3) TELEFONE: campo _billing_phone + varredura sem filtro de data
     if (!orders.length && phoneDigits && phoneDigits.length >= 10) {
-      for (const k of ['_billing_phone', 'billing_phone']) {
+      for (const k of ['_billing_phone', 'billing_phone', '_billing_cellphone']) {
         try {
           orders = orders.concat(await wooFetchAll('/orders', { meta_key: k, meta_value: phoneDigits }));
         } catch (e) { /* tenta outra chave */ }

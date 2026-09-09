@@ -138,14 +138,15 @@ function orderMeta(ord, key) {
 }
 function matchDoc(ord, docDigits) {
   if (!docDigits) return false;
-  const keys = [...WOO_KEYS_META, '_billing_persontype', 'billing_persontype'];
-  for (const k of keys) {
-    const v = normDigits(orderMeta(ord, k));
-    if (v && (v.endsWith(docDigits) || docDigits.endsWith(v) || v.endsWith(docDigits.replace(/^0+/, '')))) return true;
-  }
+  const target = String(docDigits).replace(/^0+/, '');
+  const docKeys = ['cpf', 'cnpj', 'documento', 'doc', 'inscricao', 'nit', 'pis'];
   for (const m of (ord.meta_data || [])) {
-    const v = normDigits(m.value);
-    if (v && (v.endsWith(docDigits) || docDigits.endsWith(v))) return true;
+    const key = String(m.key || '').toLowerCase();
+    if (!docKeys.some(k => key.includes(k))) continue;
+    const v = String(m.value || '').replace(/\D/g, '').replace(/^0+/, '');
+    if (!v) continue;
+    if (v === target) return true;
+    if ((v.endsWith(target) || target.endsWith(v)) && Math.min(v.length, target.length) >= 9) return true;
   }
   return false;
 }

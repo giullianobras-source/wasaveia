@@ -173,18 +173,33 @@ async function wooFetchAll(path, params) {
   }
   return out;
 }
-async function wooRecentDays(days, maxPages) {
-  const after = new Date(Date.now() - days * 86400000).toISOString();
+async function wooRecentPages(maxPages) {
+  // Sem filtro de data (after): evita 404 da hospedagem; pedidos vem do mais novo ao mais antigo
   const out = [];
   let page = 1;
-  maxPages = maxPages || 30;
+  maxPages = maxPages || 15;
   while (page <= maxPages) {
-    const data = await wooGet('/orders', { after, per_page: 100, page });
-    out.push(...data);
-    if (data.length < 100) break;
+    try {
+      const data = await wooGet('/orders', { per_page: 100, page });
+      out.push(...data);
+      if (!data.length || data.length < 100) break;
+    } catch (e) {
+      console.error('[WOO] Falha na pagina ' + page + ' (continuando com o que ja veio):', e.message);
+      break;
+    }
     page++;
   }
   return out;
+}
+
+function phonesMatch(a, b) {
+  if (!a || !b) return false;
+  const x = String(a).replace(/\D/g, '');
+  const y = String(b).replace(/\D/g, '');
+  if (!x || !y) return false;
+  if (x === y) return true;
+  if (x.endsWith(y) || y.endsWith(x)) return true;
+  return x.slice(-9) === y.slice(-9);
 }
 
 async function getWooOrders(query) {
@@ -198,19 +213,18 @@ async function getWooOrders(query) {
     const phoneDigits = query.phone ? normDigits(query.phone) : null;
     let orders = [];
 
-    // 1) DOCUMENTO (CPF/CNPJ): filtro por meta + fallback por varredura
+    // 1) DOCUMENTO (CPF/CNPJ): filtro por campo (sem filtro de data)
     if (docDigits) {
       for (const k of WOO_KEYS_META) {
         for (const v of [docDigits, docDigits.replace(/^0+/, '')]) {
           try {
             orders = orders.concat(await wooFetchAll('/orders', { meta_key: k, meta_value: v }));
-          } catch (e) { /* tenta próxima chave */ }
+          } catch (e) { /* tenta proxima chave */ }
         }
       }
       orders = dedupeOrders(orders).filter(o => matchDoc(o, docDigits));
       if (!orders.length) {
-        orders = (await wooRecentDays(730, 30)).filter(o => matchDoc(o, docDigits));
-        console.log('[WOO] Documento por varredura: ' + orders.length + ' pedido(s)');
+        orders = (await wooRecentPages(15)).filter(o => matchDoc(o, docDigits));
       }
       console.log('[WOO] Busca por documento (' + docDigits.length + ' digitos): ' + orders.length + ' pedido(s)');
     }
@@ -230,14 +244,21 @@ async function getWooOrders(query) {
       console.log('[WOO] Busca por e-mail: ' + orders.length + ' pedido(s)');
     }
 
-    // 3) TELEFONE: varredura recente + filtro por billing.phone
+    // 3) TELEFONE: campo _billing_phone + varredura sem filtro de data
     if (!orders.length && phoneDigits && phoneDigits.length >= 10) {
-      orders = (await wooRecentDays(730, 30)).filter(o => {
-        const t = normDigits(o.billing && o.billing.phone);
-        const a = phoneDigits.slice(-10);
-        const b = t ? t.slice(-10) : '';
-        return !!(t && (b.endsWith(a) || a.endsWith(b)));
-      });
+      for (const k of ['_billing_phone', 'billing_phone']) {
+        try {
+          orders = orders.concat(await wooFetchAll('/orders', { meta_key: k, meta_value: phoneDigits }));
+        } catch (e) { /* tenta outra chave */ }
+      }
+      orders = dedupeOrders(orders).filter(o => phonesMatch(o.billing && o.billing.phone, phoneDigits));
+      if (!orders.length) {
+        orders = (await wooRecentPages(15)).filter(o =>
+          phonesMatch(o.billing && o.billing.phone, phoneDigits) ||
+          phonesMatch(o.shipping && o.shipping.phone, phoneDigits)
+        );
+      }
+      orders = dedupeOrders(orders);
       console.log('[WOO] Busca por telefone: ' + orders.length + ' pedido(s)');
     }
 
@@ -282,7 +303,6 @@ async function getWooOrders(query) {
     return null;
   }
 }
-
 // ===== WEBHOOK - Verificação (GET) =====
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];

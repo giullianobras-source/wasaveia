@@ -114,6 +114,7 @@ async function callGemini(history) {
 
 // ===== WOOCOMMERCE =====
 const WOO_KEYS_META = ['_billing_cpf', 'billing_cpf', '_billing_cnpj', 'billing_cnpj', '_billing_cpf_cnpj', 'billing_cpf_cnpj'];
+const PHONE_KEYS_META = ['_billing_cellphone', 'billing_cellphone', '_billing_phone', 'billing_phone', '_billing_mobile', 'billing_mobile', '_billing_telephone', 'billing_telephone'];
 
 function normDigits(s) { return String(s || '').replace(/\D/g, ''); }
 
@@ -149,6 +150,29 @@ function matchDoc(ord, docDigits) {
     if ((v.endsWith(target) || target.endsWith(v)) && Math.min(v.length, target.length) >= 9) return true;
   }
   return false;
+}
+function phonesMatch(a, b) {
+  if (!a || !b) return false;
+  const x = String(a).replace(/\D/g, '');
+  const y = String(b).replace(/\D/g, '');
+  if (!x || !y) return false;
+  if (x === y) return true;
+  if (x.endsWith(y) || y.endsWith(x)) return true;
+  return x.slice(-9) === y.slice(-9);
+}
+function orderPhoneValues(ord) {
+  const vals = [];
+  const b = ord.billing || {};
+  const s = ord.shipping || {};
+  if (b.phone) vals.push(b.phone);
+  if (s.phone) vals.push(s.phone);
+  for (const m of (ord.meta_data || [])) {
+    const k = String(m.key || '').toLowerCase();
+    if (k.includes('phone') || k.includes('cell') || k.includes('celular') || k.includes('mobile') || k.includes('telefone') || k.includes('whats')) {
+      if (m.value) vals.push(String(m.value));
+    }
+  }
+  return vals;
 }
 
 async function wooGet(path, params) {
@@ -192,16 +216,6 @@ async function wooRecentPages(maxPages) {
   return out;
 }
 
-function phonesMatch(a, b) {
-  if (!a || !b) return false;
-  const x = String(a).replace(/\D/g, '');
-  const y = String(b).replace(/\D/g, '');
-  if (!x || !y) return false;
-  if (x === y) return true;
-  if (x.endsWith(y) || y.endsWith(x)) return true;
-  return x.slice(-9) === y.slice(-9);
-}
-
 async function getWooOrders(query) {
   try {
     if (!WOO_URL || !WOO_CONSUMER_KEY || !WOO_CONSUMER_SECRET) {
@@ -213,7 +227,7 @@ async function getWooOrders(query) {
     const phoneDigits = query.phone ? normDigits(query.phone) : null;
     let orders = [];
 
-    // 1) DOCUMENTO (CPF/CNPJ): filtro por campo (sem filtro de data)
+    // 1) DOCUMENTO (CPF/CNPJ): filtro por campo + varredura sem filtro de data
     if (docDigits) {
       for (const k of WOO_KEYS_META) {
         for (const v of [docDigits, docDigits.replace(/^0+/, '')]) {
@@ -225,6 +239,7 @@ async function getWooOrders(query) {
       orders = dedupeOrders(orders).filter(o => matchDoc(o, docDigits));
       if (!orders.length) {
         orders = (await wooRecentPages(15)).filter(o => matchDoc(o, docDigits));
+        console.log('[WOO] Documento por varredura: ' + orders.length + ' pedido(s)');
       }
       console.log('[WOO] Busca por documento (' + docDigits.length + ' digitos): ' + orders.length + ' pedido(s)');
     }
@@ -244,19 +259,16 @@ async function getWooOrders(query) {
       console.log('[WOO] Busca por e-mail: ' + orders.length + ' pedido(s)');
     }
 
-    // 3) TELEFONE: campo _billing_phone + varredura sem filtro de data
+    // 3) TELEFONE: campos de telefone + varredura sem filtro de data
     if (!orders.length && phoneDigits && phoneDigits.length >= 10) {
-      for (const k of ['_billing_phone', 'billing_phone', '_billing_cellphone']) {
+      for (const k of PHONE_KEYS_META) {
         try {
           orders = orders.concat(await wooFetchAll('/orders', { meta_key: k, meta_value: phoneDigits }));
-        } catch (e) { /* tenta outra chave */ }
+        } catch (e) { /* tenta proxima chave */ }
       }
-      orders = dedupeOrders(orders).filter(o => phonesMatch(o.billing && o.billing.phone, phoneDigits));
+      orders = dedupeOrders(orders).filter(o => orderPhoneValues(o).some(p => phonesMatch(p, phoneDigits)));
       if (!orders.length) {
-        orders = (await wooRecentPages(15)).filter(o =>
-          phonesMatch(o.billing && o.billing.phone, phoneDigits) ||
-          phonesMatch(o.shipping && o.shipping.phone, phoneDigits)
-        );
+        orders = (await wooRecentPages(15)).filter(o => orderPhoneValues(o).some(p => phonesMatch(p, phoneDigits)));
       }
       orders = dedupeOrders(orders);
       console.log('[WOO] Busca por telefone: ' + orders.length + ' pedido(s)');
@@ -303,6 +315,7 @@ async function getWooOrders(query) {
     return null;
   }
 }
+
 // ===== WEBHOOK - Verificação (GET) =====
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
